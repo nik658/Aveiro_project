@@ -45,7 +45,6 @@ def sample_indices(data_len: int) -> list[int]:
     num_samples = estimate_num_samples(data_len)
     return np.round(np.linspace(0, data_len - 1, num_samples)).astype(int).tolist()
 
-
 def auto_downsample_height_width(img: np.ndarray, target_size: int = 150, max_size_threshold: int = 300):
     _, height, width = img.shape
 
@@ -56,24 +55,36 @@ def auto_downsample_height_width(img: np.ndarray, target_size: int = 150, max_si
     downsample_factor = int(width / target_size) if width > height else int(height / target_size)
     return img[:, ::downsample_factor, ::downsample_factor]
 
-
 def sample_images(image_paths: list[str]) -> np.ndarray:
+    if not image_paths:
+        return None
+    
     sampled_indices = sample_indices(len(image_paths))
-
+    
     images = None
+    valid_images = 0
+    
     for i, idx in enumerate(sampled_indices):
         path = image_paths[idx]
-        # we load as uint8 to reduce memory usage
-        img = load_image_as_numpy(path, dtype=np.uint8, channel_first=True)
-        img = auto_downsample_height_width(img)
+        try:
+            # we load as uint8 to reduce memory usage
+            img = load_image_as_numpy(path, dtype=np.uint8, channel_first=True)
+            img = auto_downsample_height_width(img)
 
-        if images is None:
-            images = np.empty((len(sampled_indices), *img.shape), dtype=np.uint8)
+            if images is None:
+                images = np.empty((len(sampled_indices), *img.shape), dtype=np.uint8)
 
-        images[i] = img
-
-    return images
-
+            images[valid_images] = img
+            valid_images += 1
+        except Exception as e:
+            print(f"Failed to load image {path}: {e}")
+            continue
+    
+    if valid_images == 0:
+        return None
+    
+    # Return only the valid images
+    return images[:valid_images] if valid_images < len(sampled_indices) else images
 
 def get_feature_stats(array: np.ndarray, axis: tuple, keepdims: bool) -> dict[str, np.ndarray]:
     return {
@@ -84,7 +95,6 @@ def get_feature_stats(array: np.ndarray, axis: tuple, keepdims: bool) -> dict[st
         "count": np.array([len(array)]).tolist(),
     }
 
-
 def get_feature_stats_img(array: np.ndarray, axis: tuple, keepdims: bool) -> dict[str, np.ndarray]:
     return {
         "min": np.min(array, axis=axis, keepdims=keepdims),
@@ -94,7 +104,8 @@ def get_feature_stats_img(array: np.ndarray, axis: tuple, keepdims: bool) -> dic
         "count": np.array([len(array)]),
     }
 
-mypath = os.environ['HOME'] + '/training_data/lerobot/my_pusht/data/chunk-000'
+# Main execution
+mypath = os.environ['HOME'] + '/Project/Aveiro_project/lerobot/xarm_lift_data/data/chunk-000'
 onlyfiles = [f for f in listdir(mypath) if isfile(join(mypath, f))]
 onlyfiles.sort()
 
@@ -108,36 +119,76 @@ for file in onlyfiles:
     episode_dic['stats'] = {}
 
     # converting mp4 file into images and store it into a temporary folder
-    observation_image_path = os.environ['HOME'] + '/training_data/lerobot/my_pusht/videos/chunk-000/observation.image/'
+    observation_image_path = os.environ['HOME'] + '/Project/Aveiro_project/lerobot/xarm_lift_data/videos/chunk-000/observation.image/'
     video_path = observation_image_path + file.replace('parquet', '') + 'mp4'
     temp_img_path = observation_image_path + 'temp_imgs/'
     img_index = 0
-    #video_data = [video_path + file.replace('parquet', '') + 'mp4']
+    
+    # Create temp directory if it doesn't exist
+    if os.path.exists(temp_img_path):
+        shutil.rmtree(temp_img_path)
     os.makedirs(temp_img_path)
+    
     print(f"video_path:{video_path}")
-    cap = cv2.VideoCapture(video_path) # says we capture an image from a webcam
+    
+    # Check if video file exists
+    if not os.path.exists(video_path):
+        print(f"Warning: Video file not found: {video_path}")
+        shutil.rmtree(temp_img_path)
+        continue
+    
+    cap = cv2.VideoCapture(video_path)
+    
+    if not cap.isOpened():
+        print(f"Error: Could not open video file: {video_path}")
+        shutil.rmtree(temp_img_path)
+        continue
+    
     while(cap.isOpened()):
-        ret,cv2_img = cap.read()
+        ret, cv2_img = cap.read()
         if ret:
-            #converted_img = cv2.cvtColor(cv2_img,cv2.COLOR_BGR2RGB)
-            img_name = temp_img_path + f"img{img_index}.png"
-            #print(f"ret:{ret}, img_name:{img_name}")
+            img_name = temp_img_path + f"img{img_index:06d}.png"
             cv2.imwrite(img_name, cv2_img)
             img_index += 1
         else:
             break
     cap.release()
+    
+    # Get image paths and sort them
     img_paths = [temp_img_path + f for f in listdir(temp_img_path) if isfile(join(temp_img_path, f))]
-    #img_paths.sort()
-    #print(f"len img_paths:{len(img_paths)}")
+    img_paths.sort()
+    
+    print(f"Number of extracted images: {len(img_paths)}")
+    
+    if len(img_paths) == 0:
+        print(f"Warning: No images extracted from video: {video_path}")
+        shutil.rmtree(temp_img_path)
+        continue
+    
     ep_ft_array = sample_images(img_paths)
-    #print(f"ep_ft_array.shape:{ep_ft_array.shape}, ep_ft_array.dim:{ep_ft_array.ndim}")
+    
+    if ep_ft_array is None or ep_ft_array.size == 0:
+        print(f"Warning: No valid images sampled for {file}. Skipping episode.")
+        shutil.rmtree(temp_img_path)
+        continue
+    
+    print(f"ep_ft_array.shape:{ep_ft_array.shape}, ep_ft_array.ndim:{ep_ft_array.ndim}")
+    
+    # Ensure we have the right dimensions for statistics calculation
+    if ep_ft_array.ndim != 4:
+        print(f"Warning: Expected 4D array, got {ep_ft_array.ndim}D. Skipping episode.")
+        shutil.rmtree(temp_img_path)
+        continue
+    
     temp_video_stats = get_feature_stats_img(ep_ft_array, axis=(0, 2, 3), keepdims=True)
     video_stats = {k: v if k == "count" else np.squeeze(v / 255.0, axis=0) for k, v in temp_video_stats.items()}
     video_stats = {k: v.tolist() for k, v in video_stats.items()}
     episode_dic['stats']['observation.image'] = video_stats
+    
+    # Clean up temporary directory
     shutil.rmtree(temp_img_path)
 
+    # Process other features
     observation_state_list = []
     for i in range(len(df['observation.state'])):
         observation_state_list.append(df['observation.state'][i].tolist())
@@ -156,11 +207,14 @@ for file in onlyfiles:
     episode_dic['stats']['next.success'] = get_feature_stats(df['next.success'].to_numpy(), axis=0, keepdims=1)
     episode_dic['stats']['index'] = get_feature_stats(df['index'].to_numpy(), axis=0, keepdims=1)
     episode_dic['stats']['task_index'] = get_feature_stats(df['task_index'].to_numpy(), axis=0, keepdims=1)
-    #print(episode_dic['stats']['task_index'])
+    
     jsonl_data.append(episode_dic)
-#'''
 
+# Write results to JSONL file
 with open('episodes_stats.jsonl', 'w') as f:
     for l in jsonl_data:
-        f.writelines([json.dumps(l)])
-        f.writelines("\n")
+        f.write(json.dumps(l))
+        f.write("\n")
+
+print(f"Successfully processed {len(jsonl_data)} episodes")
+
